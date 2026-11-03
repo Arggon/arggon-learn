@@ -335,7 +335,17 @@
     if (typeof obj.version === "string" && obj.version.trim() === "2") throw new ImportError("imp_err_version_str");
     if (obj.version !== undefined && obj.version !== 2) { const v = String(obj.version); throw new ImportError("imp_err_version", { v: v.length > 40 ? v.slice(0, 39) + "…" : v }); }
     const hasData = knownIds(obj.done).length || knownIds(obj.quiz).length || knownIds(obj.manualKnown).length || validProfile(obj.profile);
-    if (!hasData) throw new ImportError("imp_err_empty");
+    // Empty backups need the complete v2 export envelope, not just a version/app marker.
+    // AI Learning Hub exported the same state + exportedAt without the app field.
+    const emptyExport = obj.version === 2 && obj.profile === null && typeof obj.skipped === "boolean" &&
+      ["done", "quiz", "manualKnown"].every((f) => plain(obj[f]) && Object.keys(obj[f]).length === 0) &&
+      plain(obj.settings) && ["pseudo", "python", "ts", "csharp"].includes(obj.settings.codeLang) &&
+      ["en", "es"].includes(obj.settings.uiLang) && ["light", "dark"].includes(obj.settings.theme) &&
+      ["auto", "beginner", "builder", "theory"].includes(obj.settings.track) && plain(obj.view) &&
+      (obj.view.subgraphs === undefined || typeof obj.view.subgraphs === "boolean") &&
+      (obj.view.zoom === undefined || Number.isFinite(obj.view.zoom)) &&
+      typeof obj.exportedAt === "string" && Number.isFinite(Date.parse(obj.exportedAt));
+    if (!hasData && !emptyExport) throw new ImportError("imp_err_empty");
     if (obj.version === 2) return sanitize(obj);
     return migrateV1(obj); // v1: no version field, done / quiz are plain objects
   }
