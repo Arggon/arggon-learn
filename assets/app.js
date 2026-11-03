@@ -22,9 +22,9 @@
     const s = fresh(); if (!raw || typeof raw !== "object") return s;
     if (raw.profile && typeof raw.profile === "object" && raw.profile.answers) s.profile = { answers: { ...raw.profile.answers }, at: raw.profile.at || null };
     s.skipped = !!raw.skipped;
-    for (const [id, v] of Object.entries(raw.manualKnown || {})) if (BY[id] && typeof v === "boolean") s.manualKnown[id] = v;
-    for (const [id, v] of Object.entries(raw.done || {})) if (BY[id] && v === true) s.done[id] = true;
-    for (const [id, q] of Object.entries(raw.quiz || {})) if (BY[id] && q && Number.isFinite(q.best)) s.quiz[id] = { best: Math.min(q.best, BY[id].quiz.length), last: Number.isFinite(q.last) ? q.last : q.best, at: q.at || null };
+    for (const [id, v] of Object.entries(raw.manualKnown || {})) if (Object.hasOwn(BY, id) && typeof v === "boolean") s.manualKnown[id] = v;
+    for (const [id, v] of Object.entries(raw.done || {})) if (Object.hasOwn(BY, id) && v === true) s.done[id] = true;
+    for (const [id, q] of Object.entries(raw.quiz || {})) if (Object.hasOwn(BY, id) && q && Number.isFinite(q.best)) s.quiz[id] = { best: Math.min(q.best, BY[id].quiz.length), last: Number.isFinite(q.last) ? q.last : q.best, at: q.at || null };
     const st = raw.settings || {};
     if (LANGS[st.codeLang] && st.codeLang !== "any") s.settings.codeLang = st.codeLang;
     if (st.uiLang === "es" || st.uiLang === "en") s.settings.uiLang = st.uiLang;
@@ -46,8 +46,8 @@
   /* v1 stored {done, quiz, theme, glosses, subgraphs, zoom}; its "k_*" nodes were assumed knowledge and no longer exist. */
   function migrateV1(v1) {
     const s = fresh(), dropped = [];
-    for (const [id, v] of Object.entries(v1.done || {})) { if (BY[id] && v) s.done[id] = true; else dropped.push(id); }
-    for (const [id, q] of Object.entries(v1.quiz || {})) { if (BY[id] && q && Number.isFinite(q.best)) s.quiz[id] = { best: q.best, last: q.last ?? q.best, at: q.at || null }; else dropped.push("quiz:" + id); }
+    for (const [id, v] of Object.entries(v1.done || {})) { if (Object.hasOwn(BY, id) && v) s.done[id] = true; else dropped.push(id); }
+    for (const [id, q] of Object.entries(v1.quiz || {})) { if (Object.hasOwn(BY, id) && q && Number.isFinite(q.best)) s.quiz[id] = { best: q.best, last: q.last ?? q.best, at: q.at || null }; else dropped.push("quiz:" + id); }
     if (v1.theme === "dark") s.settings.theme = "dark";
     s.view = { subgraphs: !!v1.subgraphs, zoom: Number.isFinite(v1.zoom) ? v1.zoom : undefined };
     s.migratedFrom = { key: V1, at: new Date().toISOString(), done: Object.keys(s.done).length, quiz: Object.keys(s.quiz).length, dropped };
@@ -323,7 +323,7 @@
   // only replaced after a file passes every check.
   class ImportError extends Error { constructor(key, vars = {}) { super(key); this.key = key; this.vars = vars; } }
   const plain = (o) => !!o && typeof o === "object" && !Array.isArray(o);
-  const knownIds = (o) => (plain(o) ? Object.keys(o).filter((id) => BY[id]) : []);
+  const knownIds = (o) => (plain(o) ? Object.keys(o).filter((id) => Object.hasOwn(BY, id)) : []);
   const validProfile = (p) => plain(p) && plain(p.answers) && Object.keys(p.answers).length > 0;
   function importState(obj) {
     if (!plain(obj)) throw new ImportError("imp_err_obj");
@@ -335,7 +335,17 @@
     if (typeof obj.version === "string" && obj.version.trim() === "2") throw new ImportError("imp_err_version_str");
     if (obj.version !== undefined && obj.version !== 2) { const v = String(obj.version); throw new ImportError("imp_err_version", { v: v.length > 40 ? v.slice(0, 39) + "…" : v }); }
     const hasData = knownIds(obj.done).length || knownIds(obj.quiz).length || knownIds(obj.manualKnown).length || validProfile(obj.profile);
-    if (!hasData) throw new ImportError("imp_err_empty");
+    // Empty backups need the complete v2 export envelope, not just a version/app marker.
+    // AI Learning Hub exported the same state + exportedAt without the app field.
+    const emptyExport = obj.version === 2 && obj.profile === null && typeof obj.skipped === "boolean" &&
+      ["done", "quiz", "manualKnown"].every((f) => plain(obj[f]) && Object.keys(obj[f]).length === 0) &&
+      plain(obj.settings) && ["pseudo", "python", "ts", "csharp"].includes(obj.settings.codeLang) &&
+      ["en", "es"].includes(obj.settings.uiLang) && ["light", "dark"].includes(obj.settings.theme) &&
+      ["auto", "beginner", "builder", "theory"].includes(obj.settings.track) && plain(obj.view) &&
+      (obj.view.subgraphs === undefined || typeof obj.view.subgraphs === "boolean") &&
+      (obj.view.zoom === undefined || Number.isFinite(obj.view.zoom)) &&
+      typeof obj.exportedAt === "string" && Number.isFinite(Date.parse(obj.exportedAt));
+    if (!hasData && !emptyExport) throw new ImportError("imp_err_empty");
     if (obj.version === 2) return sanitize(obj);
     return migrateV1(obj); // v1: no version field, done / quiz are plain objects
   }

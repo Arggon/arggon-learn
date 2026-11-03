@@ -99,6 +99,173 @@ const BASE = { version: 2, skipped: true, done: { web_apis: true }, quiz: { web_
     ok(dl.suggestedFilename() === "arggon-learn-progress.json" && exp.app === "arggon-learn" && exp.done.web_apis === true, `export file is ${dl.suggestedFilename()} with app marker`);
   });
 
+  async function exportFile(p) {
+    await p.evaluate(() => (location.hash = "#/settings")); await p.waitForSelector("#export");
+    const [dl] = await Promise.all([p.waitForEvent("download"), p.click("#export")]);
+    return { name: dl.suggestedFilename(), text: fs.readFileSync(await dl.path(), "utf8") };
+  }
+
+  await section("5b. Fresh app-generated empty backup restores over populated progress", {}, async (s) => {
+    const file = await exportFile(s.p);
+    await importFile(s.p, "populated.json", JSON.stringify(BASE));
+    s.dialogs.length = 0;
+    const r = await importFile(s.p, file.name, file.text);
+    ok(r.cls === "good", "fresh exported empty backup is accepted");
+    ok(s.dialogs.length === 1 && s.dialogs[0].includes("(0 concepts done, 0 quiz scores)?"), "empty replacement still requires explicit confirmation");
+    ok(await s.p.evaluate(() => Object.keys(HUB.S.done).length === 0 && Object.keys(HUB.S.quiz).length === 0 && HUB.S.profile === null && HUB.S.settings.codeLang === "pseudo"), "empty backup replaces populated progress");
+    await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+    ok(await s.p.evaluate(() => Object.keys(HUB.S.done).length === 0 && Object.keys(HUB.S.quiz).length === 0 && JSON.parse(localStorage.getItem("arggonLearn.v1")).version === 2), "empty replacement persists under arggonLearn.v1 across reload");
+  });
+
+  // Exercise real downloads and file uploads, not a hand-written empty fixture.
+  for (const [name, seed, prefs] of [
+    ["preferences EN / TypeScript", { version: 2, skipped: true, trackId: "ai", view: { subgraphs: true, zoom: 1.25 }, copiedFrom: { key: "aiHub.v2", at: "2026-10-01T00:00:00Z" }, migratedFrom: { key: "aiHub.v1", at: "2026-10-01T00:00:00Z", done: 0, quiz: 0, dropped: ["k_old"] } }, { uiLang: "en", codeLang: "ts", theme: "dark", track: "theory" }],
+    ["preferences ES / C#", { version: 2, view: { subgraphs: false, zoom: 0.75 } }, { uiLang: "es", codeLang: "csharp", theme: "dark", track: "builder" }],
+    ["populated with safe migration metadata", { ...OLD, manualKnown: { math_basics: true, db_basics: false }, trackId: "ai", copiedFrom: { key: "aiHub.v2", at: "2026-10-01T00:00:00Z" }, migratedFrom: { key: "aiHub.v1", at: "2026-10-01T00:00:00Z", done: 2, quiz: 1, dropped: ["k_old"] } }, null],
+  ]) {
+    await section(`5c. Actual export → import → save/reload: ${name}`, seeded({ "arggonLearn.v1": seed }), async (s) => {
+      await s.p.evaluate(() => (location.hash = "#/settings")); await s.p.waitForSelector("#set-code");
+      if (prefs) {
+        await s.p.selectOption("#set-code", prefs.codeLang);
+        await s.p.selectOption("#set-ui", prefs.uiLang);
+        await s.p.selectOption("#set-theme", prefs.theme);
+        await s.p.selectOption("#set-track", prefs.track);
+        ok(await s.p.evaluate((want) => HUB.S.settings.uiLang === want.uiLang && HUB.S.settings.codeLang === want.codeLang && HUB.S.profile === null && Object.keys(HUB.S.done).length === 0, prefs), "UI and code language preferences are independent without learning progress");
+      }
+      const file = await exportFile(s.p);
+      const expected = JSON.parse(file.text); delete expected.app; delete expected.exportedAt;
+      await importFile(s.p, "populated-target.json", JSON.stringify(BASE));
+      s.dialogs.length = 0;
+      const r = await importFile(s.p, file.name, file.text);
+      ok(r.cls === "good" && s.dialogs.length === 1, "actual exported backup accepted only after confirmation");
+      const equal = async () => require("util").isDeepStrictEqual(await s.p.evaluate(() => JSON.parse(JSON.stringify(HUB.S))), expected);
+      ok(await equal(), "all exported learning state, preferences, view and safe metadata restored");
+      ok(await s.p.evaluate((want) => document.documentElement.lang === want.uiLang && document.documentElement.dataset.theme === want.theme && document.querySelector("#set-code").value === want.codeLang && document.querySelector("#set-track").value === want.track, expected.settings), "restored locale/theme/code-language/approach applied to UI");
+      ok(require("util").isDeepStrictEqual(JSON.parse((await state(s.p)).stored), expected), "replacement saved with payload version 2");
+      await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      ok(await equal(), "complete restored state survives reload");
+      await s.p.click("#theme-toggle"); await s.p.click("#theme-toggle");
+      await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      ok(await equal(), "subsequent save/reload retains state and migration metadata");
+    });
+  }
+
+  for (const lang of ["en", "es"]) {
+    await section(`5d. Cancel actual empty backup replacement (${lang})`, {}, async (s) => {
+      const file = await exportFile(s.p);
+      await s.p.evaluate((current) => localStorage.setItem("arggonLearn.v1", JSON.stringify(current)), { ...BASE, settings: { uiLang: lang, codeLang: "python", theme: "dark", track: "builder" } });
+      await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      const before = await state(s.p);
+      const r = await importFile(s.p, file.name, file.text);
+      const after = await state(s.p);
+      const want = lang === "en" ? "(0 concepts done, 0 quiz scores)?" : "(0 conceptos hechos, 0 puntajes de quiz)?";
+      ok(s.dialogs.length === 1 && s.dialogs[0].includes(want), "clear localized confirmation identifies empty incoming progress");
+      ok(require("util").isDeepStrictEqual(before, after) && r.cls === "muted", "cancel leaves state, exact stored bytes and locale unchanged");
+      await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      ok(require("util").isDeepStrictEqual(before, await state(s.p)), "cancel remains unchanged after reload");
+    }, { dialog: "dismiss" });
+  }
+
+  await section("5e. Recognizable empty v2 legacy export remains supported", {}, async (s) => {
+    const file = await exportFile(s.p);
+    const legacy = JSON.parse(file.text); delete legacy.app;
+    await importFile(s.p, "target.json", JSON.stringify(BASE)); s.dialogs.length = 0;
+    const r = await importFile(s.p, "ai-hub-progress.json", JSON.stringify(legacy));
+    ok(r.cls === "good" && s.dialogs.length === 1, "complete unmarked legacy v2 empty export is accepted with confirmation");
+    await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+    ok(await s.p.evaluate(() => Object.keys(HUB.S.done).length === 0 && HUB.S.profile === null), "legacy empty replacement survives reload");
+  });
+
+  await section("5f. Partial/invalid empty envelopes cannot erase progress", {}, async (s) => {
+    const file = await exportFile(s.p), empty = JSON.parse(file.text);
+    await importFile(s.p, "target.json", JSON.stringify(BASE)); s.dialogs.length = 0;
+    await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+    const before = await state(s.p);
+    const cases = [
+      ["marker alone", { app: "arggon-learn", version: 2 }],
+      ["unrelated v2", { version: 2, name: "unrelated document", settings: {} }],
+      ["other app", { ...empty, app: "other" }],
+      ["unknown done id", { ...empty, done: { unrelated: true } }],
+      ["unknown quiz id", { ...empty, quiz: { unrelated: { best: 1 } } }],
+      ["unknown known id", { ...empty, manualKnown: { unrelated: true } }],
+      ["versionless empty", { ...empty, version: undefined }],
+      ["unsupported version", { ...empty, version: 3 }],
+      ["string version", { ...empty, version: "2" }],
+    ];
+    for (const field of ["profile", "skipped", "done", "quiz", "manualKnown", "settings", "view", "exportedAt"]) {
+      cases.push([`missing ${field}`, { ...empty, [field]: undefined }]);
+    }
+    for (const [field, value] of [["profile", {}], ["skipped", "false"], ["done", []], ["quiz", null], ["manualKnown", []], ["settings", []], ["view", []], ["exportedAt", "not a date"], ["exportedAt", 123]]) {
+      cases.push([`invalid ${field}: ${JSON.stringify(value)}`, { ...empty, [field]: value }]);
+    }
+    for (const field of ["codeLang", "uiLang", "theme", "track"]) {
+      cases.push([`missing settings.${field}`, { ...empty, settings: { ...empty.settings, [field]: undefined } }]);
+      cases.push([`invalid settings.${field}`, { ...empty, settings: { ...empty.settings, [field]: "unrecognized" } }]);
+    }
+    cases.push(["wrong subgraphs type", { ...empty, view: { subgraphs: "true" } }], ["wrong zoom type", { ...empty, view: { zoom: "1" } }]);
+    for (const [name, value] of cases) {
+      const r = await importFile(s.p, "invalid-empty.json", JSON.stringify(value));
+      ok(r.cls === "bad" && s.dialogs.length === 0 && require("util").isDeepStrictEqual(before, await state(s.p)), `${name}: rejected without confirmation or mutation`);
+    }
+    await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+    ok(require("util").isDeepStrictEqual(before, await state(s.p)), "rejected empty lookalikes leave persisted progress intact");
+  });
+
+  await section("5g. Inherited constructor is not a concept in a partial backup", seeded({ "arggonLearn.v1": BASE }), async (s) => {
+    const before = await state(s.p);
+    const r = await importFile(s.p, "inherited.json", '{"version":2,"done":{"constructor":false}}');
+    ok(r.cls === "bad", "partial constructor-only backup is rejected");
+    ok(s.dialogs.length === 0, "invalid inherited-name backup never asks for replacement");
+    ok(require("util").isDeepStrictEqual(before, await state(s.p)), "invalid inherited-name import preserves state, storage and locale");
+    await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+    ok(require("util").isDeepStrictEqual(before, await state(s.p)), "invalid inherited-name import preserves progress after reload");
+  });
+
+  // Parse raw JSON so __proto__ is an own fixture key, not object-literal prototype syntax.
+  for (const lang of ["en", "es"]) {
+    await section(`5h. Inherited-only maps never recognize a backup (${lang})`, seeded({ "arggonLearn.v1": { ...BASE, settings: { uiLang: lang, codeLang: "python", theme: "dark", track: "builder" } } }), async (s) => {
+      const before = await state(s.p);
+      for (const id of ["constructor", "toString", "__proto__"]) {
+        for (const [field, values] of [["done", [false, true]], ["manualKnown", [false, true]], ["quiz", [{ best: 1, last: 1 }]]]) {
+          for (const value of values) {
+            for (const version of ['"version":2,', ""]) {
+              const text = `{${version}"${field}":{"${id}":${JSON.stringify(value)}}}`;
+              const r = await importFile(s.p, "inherited-only.json", text);
+              ok(r.cls === "bad" && s.dialogs.length === 0 && require("util").isDeepStrictEqual(before, await state(s.p)), `${version ? "v2" : "v1"} ${field}.${id}=${JSON.stringify(value)}: rejected without confirmation/state/storage/locale mutation`);
+            }
+          }
+        }
+      }
+      await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      ok(require("util").isDeepStrictEqual(before, await state(s.p)), "rejected inherited-only files leave progress intact across reload");
+    });
+  }
+
+  const mixed = JSON.parse('{"done":{"web_apis":true,"constructor":true,"toString":false,"__proto__":true},"manualKnown":{"math_basics":false,"db_basics":true,"constructor":false,"toString":true,"__proto__":false},"quiz":{"web_apis":{"best":2,"last":1},"constructor":{"best":1},"toString":{"best":1},"__proto__":{"best":1}}}');
+  const onlyRealConcepts = (S, v1) => Object.keys(S.done).join() === "web_apis" && Object.keys(S.quiz).join() === "web_apis" && S.quiz.web_apis.best === 2 && S.quiz.web_apis.last === 1 && (v1 ? Object.keys(S.manualKnown).length === 0 : Object.keys(S.manualKnown).sort().join() === "db_basics,math_basics" && S.manualKnown.math_basics === false && S.manualKnown.db_basics === true);
+  for (const v1 of [false, true]) {
+    await section(`5i. Mixed legitimate/inherited maps import safely (${v1 ? "v1" : "v2"})`, seeded({ "arggonLearn.v1": BASE }), async (s) => {
+      const r = await importFile(s.p, "mixed.json", JSON.stringify(v1 ? mixed : { ...mixed, version: 2 }));
+      ok(r.cls === "good" && s.dialogs.length === 1, "mixed backup retains populated compatibility and confirmation");
+      ok(onlyRealConcepts(await s.p.evaluate(() => HUB.S), v1), "only legitimate done/quiz/manualKnown survive mixed import");
+      await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      ok(onlyRealConcepts(await s.p.evaluate(() => HUB.S), v1), "clean mixed replacement survives save/reload");
+    });
+  }
+  for (const key of ["arggonLearn.v1", "aiHub.v2", "aiHub.v1"]) {
+    const v1 = key === "aiHub.v1", raw = JSON.stringify(v1 ? mixed : { ...mixed, version: 2 });
+    await section(`5j. Own concept membership on load/migration from ${key}`, { [key]: raw }, async (s) => {
+      ok(onlyRealConcepts(await s.p.evaluate(() => HUB.S), v1), "load/migration retains legitimate maps and discards inherited names");
+      if (v1) {
+        const dropped = await s.p.evaluate(() => HUB.S.migratedFrom.dropped);
+        ok(["constructor", "toString", "__proto__"].every((id) => dropped.includes(id) && dropped.includes("quiz:" + id)), "v1 migration records inherited names as dropped, not concepts");
+      }
+      await s.p.click("#theme-toggle"); await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      ok(onlyRealConcepts(await s.p.evaluate(() => HUB.S), v1), "loaded legitimate progress survives subsequent save/reload");
+      if (key !== "arggonLearn.v1") ok(await s.p.evaluate(({ key, raw }) => localStorage.getItem(key) === raw, { key, raw }), "original legacy key bytes retained");
+    });
+  }
+
   const valid = [
     ["old ai-hub-progress.json (v2, no app field)", "ai-hub-progress.json", JSON.stringify({ ...OLD, exportedAt: "2026-10-10T00:00:00Z" }), (S) => S.done.chatbot_use && S.quiz.chatbot_use.best === 3 && !S.done.web_apis],
     ["arggon-learn-progress.json", "arggon-learn-progress.json", JSON.stringify({ app: "arggon-learn", version: 2, done: { db_basics: true }, quiz: {} }), (S) => S.done.db_basics && !S.done.web_apis],
