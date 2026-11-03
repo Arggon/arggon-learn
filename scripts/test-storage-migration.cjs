@@ -211,6 +211,61 @@ const BASE = { version: 2, skipped: true, done: { web_apis: true }, quiz: { web_
     ok(require("util").isDeepStrictEqual(before, await state(s.p)), "rejected empty lookalikes leave persisted progress intact");
   });
 
+  await section("5g. Inherited constructor is not a concept in a partial backup", seeded({ "arggonLearn.v1": BASE }), async (s) => {
+    const before = await state(s.p);
+    const r = await importFile(s.p, "inherited.json", '{"version":2,"done":{"constructor":false}}');
+    ok(r.cls === "bad", "partial constructor-only backup is rejected");
+    ok(s.dialogs.length === 0, "invalid inherited-name backup never asks for replacement");
+    ok(require("util").isDeepStrictEqual(before, await state(s.p)), "invalid inherited-name import preserves state, storage and locale");
+    await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+    ok(require("util").isDeepStrictEqual(before, await state(s.p)), "invalid inherited-name import preserves progress after reload");
+  });
+
+  // Parse raw JSON so __proto__ is an own fixture key, not object-literal prototype syntax.
+  for (const lang of ["en", "es"]) {
+    await section(`5h. Inherited-only maps never recognize a backup (${lang})`, seeded({ "arggonLearn.v1": { ...BASE, settings: { uiLang: lang, codeLang: "python", theme: "dark", track: "builder" } } }), async (s) => {
+      const before = await state(s.p);
+      for (const id of ["constructor", "toString", "__proto__"]) {
+        for (const [field, values] of [["done", [false, true]], ["manualKnown", [false, true]], ["quiz", [{ best: 1, last: 1 }]]]) {
+          for (const value of values) {
+            for (const version of ['"version":2,', ""]) {
+              const text = `{${version}"${field}":{"${id}":${JSON.stringify(value)}}}`;
+              const r = await importFile(s.p, "inherited-only.json", text);
+              ok(r.cls === "bad" && s.dialogs.length === 0 && require("util").isDeepStrictEqual(before, await state(s.p)), `${version ? "v2" : "v1"} ${field}.${id}=${JSON.stringify(value)}: rejected without confirmation/state/storage/locale mutation`);
+            }
+          }
+        }
+      }
+      await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      ok(require("util").isDeepStrictEqual(before, await state(s.p)), "rejected inherited-only files leave progress intact across reload");
+    });
+  }
+
+  const mixed = JSON.parse('{"done":{"web_apis":true,"constructor":true,"toString":false,"__proto__":true},"manualKnown":{"math_basics":false,"db_basics":true,"constructor":false,"toString":true,"__proto__":false},"quiz":{"web_apis":{"best":2,"last":1},"constructor":{"best":1},"toString":{"best":1},"__proto__":{"best":1}}}');
+  const onlyRealConcepts = (S, v1) => Object.keys(S.done).join() === "web_apis" && Object.keys(S.quiz).join() === "web_apis" && S.quiz.web_apis.best === 2 && S.quiz.web_apis.last === 1 && (v1 ? Object.keys(S.manualKnown).length === 0 : Object.keys(S.manualKnown).sort().join() === "db_basics,math_basics" && S.manualKnown.math_basics === false && S.manualKnown.db_basics === true);
+  for (const v1 of [false, true]) {
+    await section(`5i. Mixed legitimate/inherited maps import safely (${v1 ? "v1" : "v2"})`, seeded({ "arggonLearn.v1": BASE }), async (s) => {
+      const r = await importFile(s.p, "mixed.json", JSON.stringify(v1 ? mixed : { ...mixed, version: 2 }));
+      ok(r.cls === "good" && s.dialogs.length === 1, "mixed backup retains populated compatibility and confirmation");
+      ok(onlyRealConcepts(await s.p.evaluate(() => HUB.S), v1), "only legitimate done/quiz/manualKnown survive mixed import");
+      await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      ok(onlyRealConcepts(await s.p.evaluate(() => HUB.S), v1), "clean mixed replacement survives save/reload");
+    });
+  }
+  for (const key of ["arggonLearn.v1", "aiHub.v2", "aiHub.v1"]) {
+    const v1 = key === "aiHub.v1", raw = JSON.stringify(v1 ? mixed : { ...mixed, version: 2 });
+    await section(`5j. Own concept membership on load/migration from ${key}`, { [key]: raw }, async (s) => {
+      ok(onlyRealConcepts(await s.p.evaluate(() => HUB.S), v1), "load/migration retains legitimate maps and discards inherited names");
+      if (v1) {
+        const dropped = await s.p.evaluate(() => HUB.S.migratedFrom.dropped);
+        ok(["constructor", "toString", "__proto__"].every((id) => dropped.includes(id) && dropped.includes("quiz:" + id)), "v1 migration records inherited names as dropped, not concepts");
+      }
+      await s.p.click("#theme-toggle"); await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      ok(onlyRealConcepts(await s.p.evaluate(() => HUB.S), v1), "loaded legitimate progress survives subsequent save/reload");
+      if (key !== "arggonLearn.v1") ok(await s.p.evaluate(({ key, raw }) => localStorage.getItem(key) === raw, { key, raw }), "original legacy key bytes retained");
+    });
+  }
+
   const valid = [
     ["old ai-hub-progress.json (v2, no app field)", "ai-hub-progress.json", JSON.stringify({ ...OLD, exportedAt: "2026-10-10T00:00:00Z" }), (S) => S.done.chatbot_use && S.quiz.chatbot_use.best === 3 && !S.done.web_apis],
     ["arggon-learn-progress.json", "arggon-learn-progress.json", JSON.stringify({ app: "arggon-learn", version: 2, done: { db_basics: true }, quiz: {} }), (S) => S.done.db_basics && !S.done.web_apis],
