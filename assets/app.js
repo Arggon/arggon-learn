@@ -18,13 +18,21 @@
 
   /* ---------- state ---------- */
   const fresh = () => ({ version: 2, profile: null, skipped: false, manualKnown: {}, done: {}, quiz: {}, settings: { codeLang: "pseudo", uiLang: "en", theme: "light", track: "auto" }, view: {} });
+  // Scores count correct answers, not percentages. Never clamp impossible scores into mastery.
+  const validScore = (value, n) => Number.isInteger(value) && value >= 0 && value <= n;
+  function quizResult(id, q) {
+    if (!Object.hasOwn(BY, id) || !q || typeof q !== "object" || Array.isArray(q)) return null;
+    const n = BY[id].quiz.length;
+    if (!validScore(q.best, n)) return null;
+    return { best: q.best, last: validScore(q.last, n) ? q.last : q.best, at: q.at || null };
+  }
   function sanitize(raw) {
     const s = fresh(); if (!raw || typeof raw !== "object") return s;
     if (raw.profile && typeof raw.profile === "object" && raw.profile.answers) s.profile = { answers: { ...raw.profile.answers }, at: raw.profile.at || null };
     s.skipped = !!raw.skipped;
     for (const [id, v] of Object.entries(raw.manualKnown || {})) if (Object.hasOwn(BY, id) && typeof v === "boolean") s.manualKnown[id] = v;
     for (const [id, v] of Object.entries(raw.done || {})) if (Object.hasOwn(BY, id) && v === true) s.done[id] = true;
-    for (const [id, q] of Object.entries(raw.quiz || {})) if (Object.hasOwn(BY, id) && q && Number.isFinite(q.best)) s.quiz[id] = { best: Math.min(q.best, BY[id].quiz.length), last: Number.isFinite(q.last) ? q.last : q.best, at: q.at || null };
+    for (const [id, q] of Object.entries(raw.quiz || {})) { const result = quizResult(id, q); if (result) s.quiz[id] = result; }
     const st = raw.settings || {};
     if (LANGS[st.codeLang] && st.codeLang !== "any") s.settings.codeLang = st.codeLang;
     if (st.uiLang === "es" || st.uiLang === "en") s.settings.uiLang = st.uiLang;
@@ -47,7 +55,7 @@
   function migrateV1(v1) {
     const s = fresh(), dropped = [];
     for (const [id, v] of Object.entries(v1.done || {})) { if (Object.hasOwn(BY, id) && v) s.done[id] = true; else dropped.push(id); }
-    for (const [id, q] of Object.entries(v1.quiz || {})) { if (Object.hasOwn(BY, id) && q && Number.isFinite(q.best)) s.quiz[id] = { best: q.best, last: q.last ?? q.best, at: q.at || null }; else dropped.push("quiz:" + id); }
+    for (const [id, q] of Object.entries(v1.quiz || {})) { const result = quizResult(id, q); if (result) s.quiz[id] = result; else dropped.push("quiz:" + id); }
     if (v1.theme === "dark") s.settings.theme = "dark";
     s.view = { subgraphs: !!v1.subgraphs, zoom: Number.isFinite(v1.zoom) ? v1.zoom : undefined };
     s.migratedFrom = { key: V1, at: new Date().toISOString(), done: Object.keys(s.done).length, quiz: Object.keys(s.quiz).length, dropped };
@@ -334,7 +342,7 @@
     if (obj.profile != null && !validProfile(obj.profile)) throw new ImportError("imp_err_shape", { field: "profile" });
     if (typeof obj.version === "string" && obj.version.trim() === "2") throw new ImportError("imp_err_version_str");
     if (obj.version !== undefined && obj.version !== 2) { const v = String(obj.version); throw new ImportError("imp_err_version", { v: v.length > 40 ? v.slice(0, 39) + "…" : v }); }
-    const hasData = knownIds(obj.done).length || knownIds(obj.quiz).length || knownIds(obj.manualKnown).length || validProfile(obj.profile);
+    const hasData = knownIds(obj.done).length || knownIds(obj.quiz).some((id) => quizResult(id, obj.quiz[id])) || knownIds(obj.manualKnown).length || validProfile(obj.profile);
     // Empty backups need the complete v2 export envelope, not just a version/app marker.
     // AI Learning Hub exported the same state + exportedAt without the app field.
     const emptyExport = obj.version === 2 && obj.profile === null && typeof obj.skipped === "boolean" &&
