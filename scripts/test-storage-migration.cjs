@@ -471,6 +471,95 @@ const BASE = { version: 2, skipped: true, done: { web_apis: true }, quiz: { web_
     });
   }
 
+  await section("19. Invalid imported best cannot become mastery", seeded({ "arggonLearn.v1": BASE }), async (s) => {
+    const r = await importFile(s.p, "scores.json", JSON.stringify({ version: 2, done: { prog_basics: true }, quiz: { prog_basics: { best: 999, last: 1 } } }));
+    ok(r.cls === "good" && s.dialogs.length === 1, "valid unrelated progress still imports with confirmation");
+    ok(await s.p.evaluate(() => HUB.S.done.prog_basics === true && !Object.hasOwn(HUB.S.quiz, "prog_basics")), "impossible best discarded instead of clamped into a perfect score");
+  });
+
+  for (const v1 of [false, true]) {
+  await section(`20. ${v1 ? "Legacy v1" : "Current v2"} scores validate best and last independently`, seeded({ "arggonLearn.v1": BASE }), async (s) => {
+    const n = await s.p.evaluate(() => CONCEPTS.find((c) => c.id === "prog_basics").quiz.length);
+    const invalid = [-1, 0.5, n + 1, 999999999, "2", true, false, null, {}, [], undefined];
+    for (const field of ["best", "last"]) {
+      for (const value of [...new Set([0, 1, n - 1, n]), ...invalid]) {
+        const good = Number.isInteger(value) && value >= 0 && value <= n;
+        const q = { best: 1, last: 0, at: "2026-10-02T00:00:00Z", [field]: value };
+        const input = { ...OLD, ...(v1 ? { version: undefined, theme: "dark" } : {}), quiz: { prog_basics: q } };
+        const r = await importFile(s.p, "scores.json", JSON.stringify(input));
+        const S = await s.p.evaluate(() => HUB.S), actual = S.quiz.prog_basics;
+        const want = field === "best" && !good ? undefined : { ...q, last: field === "last" && !good ? q.best : q.last };
+        ok(r.cls === "good" && require("util").isDeepStrictEqual(actual, want), `${field}=${JSON.stringify(value)}: valid exact scores retained, invalid best dropped/last falls back`);
+        ok(S.done.chatbot_use && (v1 ? S.settings.theme === "dark" : S.profile.answers.prog === "little" && S.manualKnown.math_basics === true && S.settings.codeLang === "python"), "score repair does not discard unrelated learning/preferences");
+      }
+    }
+  });
+  }
+
+  for (const version of [2, undefined]) {
+    await section(`21. Malformed quiz-only import cannot erase state (${version || "v1"})`, seeded({ "arggonLearn.v1": BASE }), async (s) => {
+      const before = await state(s.p);
+      for (const q of [{ best: -1 }, { best: 999 }, { best: 0.5 }, { best: "2" }, { last: 1 }, null, []]) {
+        const r = await importFile(s.p, "invalid-only.json", JSON.stringify({ version, quiz: { prog_basics: q } }));
+        ok(r.cls === "bad" && s.dialogs.length === 0, "malformed-only quiz rejected before replacement confirmation");
+        ok(require("util").isDeepStrictEqual(before, await state(s.p)), "rejected scores leave exact stored bytes, state and locale unchanged");
+      }
+    });
+  }
+
+  for (const key of ["arggonLearn.v1", "aiHub.v2", "aiHub.v1"]) {
+    await section(`22. Score boundaries through actual ${key} loads/save/reload`, {}, async (s) => {
+      const counts = await s.p.evaluate(() => CONCEPTS.map((c) => [c.id, c.quiz.length]));
+      for (const field of ["best", "last"]) {
+        // Raw JSON overflow is representable in storage and parses to +/-Infinity; JSON.stringify cannot encode it.
+        const values = ["0", "1", "-1", "0.5", "999999999", '"2"', "true", "false", "null", "{}", "[]", "1e400", "-1e400", undefined, "upper", "above"];
+        for (const token of values) {
+          const quiz = {}, expected = {};
+          for (const [id, n] of counts) {
+            const value = token === "upper" ? n : token === "above" ? n + 1 : token === undefined ? undefined : JSON.parse(token);
+            const q = { best: 1, last: 0, at: "2026-10-02T00:00:00Z", [field]: value };
+            quiz[id] = q;
+            const good = Number.isInteger(value) && value >= 0 && value <= n;
+            if (field !== "best" || good) expected[id] = { ...q, last: field === "last" && !good ? q.best : q.last };
+          }
+          const input = { ...OLD, ...(key === "aiHub.v1" ? { version: undefined, theme: "dark" } : {}), manualKnown: { math_basics: true, db_basics: false }, quiz };
+          let text = JSON.stringify(input);
+          if (token === "1e400" || token === "-1e400") text = text.replaceAll(`"${field}":null`, `"${field}":${token}`);
+          await s.p.evaluate(({ key, text }) => { localStorage.clear(); localStorage.setItem(key, text); }, { key, text });
+          await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+          const actual = await s.p.evaluate(() => HUB.S);
+          ok(require("util").isDeepStrictEqual(actual.quiz, expected), `${field}=${token}: all concept cardinalities validated on load`);
+          ok(actual.done.chatbot_use && (key === "aiHub.v1" ? actual.settings.theme === "dark" : actual.profile.answers.prog === "little" && actual.manualKnown.db_basics === false && actual.settings.codeLang === "python" && actual.settings.uiLang === "es"), "unrelated historical state preserved on load");
+          if (key !== "arggonLearn.v1") ok(await s.p.evaluate(({ key, text }) => localStorage.getItem(key) === text, { key, text }), "legacy source bytes retained");
+          await s.p.click("#theme-toggle");
+          await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+          ok(require("util").isDeepStrictEqual(await s.p.evaluate(() => HUB.S.quiz), expected), "normalized scores survive actual save/reload");
+        }
+      }
+    });
+  }
+
+  for (const version of [2, undefined]) {
+    const incoming = { version, quiz: { prog_basics: { best: 1, last: 4, at: "2026-10-02T00:00:00Z" }, chatbot_use: { best: -1 }, unknown: { best: 1 }, toString: { best: 1 }, constructor: { best: 1 } } };
+    await section(`23. Mixed quiz-only import/confirmation/export/reload (${version || "v1"})`, seeded({ "arggonLearn.v1": BASE }), async (s) => {
+      const r = await importFile(s.p, "mixed.json", JSON.stringify(incoming));
+      ok(r.cls === "good" && s.dialogs.length === 1 && s.dialogs[0].includes("0 concepts done, 1 quiz score"), "confirmation counts only surviving valid quiz record");
+      const expected = { prog_basics: incoming.quiz.prog_basics };
+      ok(require("util").isDeepStrictEqual(await s.p.evaluate(() => HUB.S.quiz), expected), "valid last greater than best retained exactly; unknown/inherited IDs dropped");
+      const file = await exportFile(s.p);
+      ok(require("util").isDeepStrictEqual(JSON.parse(file.text).quiz, expected), "real export retains valid score history");
+      await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      ok(require("util").isDeepStrictEqual(await s.p.evaluate(() => HUB.S.quiz), expected), "confirmed mixed replacement persists");
+    });
+    await section(`24. Cancel mixed score replacement (${version || "v1"})`, seeded({ "arggonLearn.v1": BASE }), async (s) => {
+      const before = await state(s.p);
+      const r = await importFile(s.p, "mixed.json", JSON.stringify(incoming));
+      ok(r.cls === "muted" && s.dialogs.length === 1 && require("util").isDeepStrictEqual(before, await state(s.p)), "cancel preserves exact state/storage despite incoming score repairs");
+      await s.p.reload(); await s.p.waitForFunction(() => window.HUB);
+      ok(require("util").isDeepStrictEqual(before, await state(s.p)), "cancel remains unchanged after reload");
+    }, { dialog: "dismiss" });
+  }
+
   await b.close();
   console.log(fails ? `\n${fails} failed` : "\nall passed"); process.exit(fails ? 1 : 0);
 })();
