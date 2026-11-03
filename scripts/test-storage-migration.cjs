@@ -238,6 +238,72 @@ const BASE = { version: 2, skipped: true, done: { web_apis: true }, quiz: { web_
     ok((await p.locator("main h2").first().innerText()) === "Tu mapa de IA, armado a partir de requisitos", "map title comes from the track copy");
   });
 
+  for (const lang of ["en", "es"]) {
+    await section(`15. Imported migration notice is text-safe (${lang})`, seeded({ "arggonLearn.v1": BASE }), async ({ p }) => {
+      const marker = '<strong data-migration-marker="untrusted">123</strong>';
+      const r = await importFile(p, "metadata.json", JSON.stringify({ ...OLD, settings: { ...OLD.settings, uiLang: lang }, migratedFrom: { key: "aiHub.v1", at: "2026-10-01T00:00:00Z", done: marker, quiz: marker, dropped: [] } }));
+      ok(r.cls === "good", "malformed optional metadata does not reject valid progress");
+      await p.evaluate(() => (location.hash = "#/welcome")); await p.waitForSelector("#ob");
+      ok(await p.locator("[data-migration-marker]").count() === 0, "import → Welcome never creates imported HTML elements");
+      // Exercise the rendering boundary separately from decoding (HUB.S is mutable diagnostic state).
+      await p.evaluate((value) => { HUB.S.migratedFrom = { done: value, quiz: value }; location.hash = "#/home"; }, marker);
+      await p.waitForSelector(".track-card");
+      await p.evaluate(() => (location.hash = "#/welcome")); await p.waitForSelector("#ob");
+      ok(await p.locator("[data-migration-marker]").count() === 0 && (await p.locator(".welcome .tip").textContent()).includes(marker), "notice renders state-derived values literally as defense in depth");
+    });
+  }
+
+  const META = { key: "aiHub.v1", at: "2026-10-01T00:00:00Z", done: 2, quiz: 1, dropped: ["k_old", "quiz:k_old"] };
+  await section("16. Migration metadata is reconstructed at import/load boundaries", seeded({ "arggonLearn.v1": BASE }), async ({ p }) => {
+    const n = await p.evaluate(() => window.CONCEPTS.length);
+    const invalid = [null, true, "legacy", [], {}, { ...META, key: "aiHub.v2" }, { ...META, key: "other" }];
+    for (const field of ["done", "quiz"]) for (const value of [-1, 1.5, "1", null, true, {}, [], n + 1, Number.MAX_SAFE_INTEGER + 1]) invalid.push({ ...META, [field]: value });
+    for (const migratedFrom of invalid) {
+      const r = await importFile(p, "metadata.json", JSON.stringify({ ...OLD, migratedFrom }));
+      const S = await p.evaluate(() => HUB.S);
+      ok(r.cls === "good" && S.done.prog_basics && S.quiz.chatbot_use.best === 3 && S.profile.answers.prog === "little" && S.manualKnown.math_basics === true && S.settings.codeLang === "python", "invalid optional metadata preserves valid learning state");
+      ok(!Object.hasOwn(S, "migratedFrom"), `discard invalid metadata: ${JSON.stringify(migratedFrom)}`);
+    }
+    const cases = [
+      [META, META],
+      [{ ...META, done: 0, quiz: n, extra: "not retained" }, { ...META, done: 0, quiz: n }],
+      [{ ...META, at: { html: "untrusted" }, dropped: ["k_old", 1, null, {}, ["nested"]], extra: true }, { ...META, at: null, dropped: ["k_old"] }],
+      [{ ...META, at: 123, dropped: "not a list" }, { ...META, at: null, dropped: [] }],
+    ];
+    for (const [migratedFrom, expected] of cases) {
+      const r = await importFile(p, "legacy-metadata.json", JSON.stringify({ ...OLD, migratedFrom }));
+      ok(r.cls === "good" && await p.evaluate((want) => JSON.stringify(HUB.S.migratedFrom) === JSON.stringify(want), expected), "known fields reconstructed; typed timestamp/list repaired without rejecting progress");
+      await p.reload(); await p.waitForFunction(() => window.HUB);
+      await p.click("#theme-toggle");
+      ok(await p.evaluate((want) => JSON.stringify(JSON.parse(localStorage.getItem("arggonLearn.v1")).migratedFrom) === JSON.stringify(want), expected), "metadata survives load/sanitize/save");
+      await p.reload(); await p.waitForFunction(() => window.HUB);
+      ok(await p.evaluate((want) => JSON.stringify(HUB.S.migratedFrom) === JSON.stringify(want) && HUB.S.manualKnown.math_basics === true && HUB.S.done.prog_basics && HUB.S.quiz.chatbot_use.best === 3, expected), "metadata and progress survive reload");
+    }
+  });
+
+  for (const key of ["arggonLearn.v1", "aiHub.v2"]) {
+    await section(`17. Stored ${key} metadata sanitized before use`, seeded({ [key]: { ...OLD, migratedFrom: { ...META, done: "<b>2</b>" } } }), async ({ p }) => {
+      ok(await p.evaluate(() => !Object.hasOwn(HUB.S, "migratedFrom") && HUB.S.done.prog_basics && HUB.S.settings.uiLang === "es"), "bad stored metadata discarded without losing progress/settings");
+      await p.click("#theme-toggle"); await p.reload(); await p.waitForFunction(() => window.HUB);
+      ok(await p.evaluate(() => !Object.hasOwn(HUB.S, "migratedFrom") && !Object.hasOwn(JSON.parse(localStorage.getItem("arggonLearn.v1")), "migratedFrom")), "sanitized metadata stays absent after save/reload");
+    });
+  }
+
+  const V1 = { done: { prog_basics: true, k_old: true }, quiz: { chatbot_use: { best: 2, last: 1 }, k_old: { best: 1 } }, theme: "dark", subgraphs: true, zoom: 1.25 };
+  for (const source of ["storage", "backup"]) {
+    await section(`18. aiHub.v1 ${source} migration remains compatible`, source === "storage" ? seeded({ "aiHub.v1": V1 }) : seeded({ "arggonLearn.v1": BASE }), async ({ p }) => {
+      if (source === "backup") ok((await importFile(p, "ai-hub-progress.json", JSON.stringify(V1))).cls === "good", "legacy backup accepted");
+      const S = await p.evaluate(() => HUB.S);
+      ok(S.migratedFrom.key === "aiHub.v1" && typeof S.migratedFrom.at === "string" && S.migratedFrom.done === 1 && S.migratedFrom.quiz === 1 && S.migratedFrom.dropped.join() === "k_old,quiz:k_old", "legacy migration produces valid metadata");
+      ok(S.done.prog_basics && S.quiz.chatbot_use.best === 2 && S.quiz.chatbot_use.last === 1 && S.settings.theme === "dark" && S.view.subgraphs && S.view.zoom === 1.25, "legacy progress/view/settings preserved");
+      await p.reload(); await p.waitForFunction(() => window.HUB);
+      ok(await p.evaluate((want) => JSON.stringify(HUB.S.migratedFrom) === JSON.stringify(want), S.migratedFrom), "legacy metadata survives sanitization on reload");
+      if (source === "storage") ok(await p.evaluate((want) => localStorage.getItem("aiHub.v1") === JSON.stringify(want), V1), "old key remains untouched");
+      await p.evaluate(() => (location.hash = "#/c/prog_basics")); await p.waitForSelector("main h1");
+      ok((await p.locator("main h1").textContent()).includes("programming"), "direct-file concept deep link still works");
+    });
+  }
+
   await b.close();
   console.log(fails ? `\n${fails} failed` : "\nall passed"); process.exit(fails ? 1 : 0);
 })();

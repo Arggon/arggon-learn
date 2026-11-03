@@ -31,7 +31,13 @@
     if (st.theme === "dark" || st.theme === "light") s.settings.theme = st.theme;
     if (["auto", "beginner", "builder", "theory"].includes(st.track)) s.settings.track = st.track;
     if (raw.view && typeof raw.view === "object") s.view = { subgraphs: !!raw.view.subgraphs, zoom: Number.isFinite(raw.view.zoom) ? raw.view.zoom : undefined };
-    if (raw.migratedFrom) s.migratedFrom = raw.migratedFrom;
+    // Optional historical metadata is untrusted on both import and load. Invalid metadata must not discard progress.
+    const mf = raw.migratedFrom;
+    if (mf && typeof mf === "object" && !Array.isArray(mf) && mf.key === V1 &&
+        [mf.done, mf.quiz].every((n) => Number.isSafeInteger(n) && n >= 0 && n <= C.length)) {
+      s.migratedFrom = { key: V1, at: typeof mf.at === "string" ? mf.at : null, done: mf.done, quiz: mf.quiz,
+        dropped: Array.isArray(mf.dropped) ? mf.dropped.filter((id) => typeof id === "string") : [] };
+    }
     // Kept on purpose: records the one-time copy from aiHub.v2 (only the known fields survive).
     const cf = raw.copiedFrom; if (cf && typeof cf === "object" && typeof cf.key === "string") s.copiedFrom = { key: cf.key, at: typeof cf.at === "string" ? cf.at : null };
     if (typeof raw.trackId === "string") s.trackId = raw.trackId;
@@ -244,7 +250,7 @@
   function viewWelcome(main) {
     const a = (S.profile && S.profile.answers) || { goal: "auto" };
     main.innerHTML = `<section class="card welcome"><h1>${t("welcome_title")}</h1><p>${tc("welcome_p1")}</p><p>${t("welcome_p2")}</p>
-      ${S.migratedFrom ? `<p class="tip">${t("migrated", { done: S.migratedFrom.done, quiz: S.migratedFrom.quiz })}</p>` : ""}
+      ${S.migratedFrom ? `<p class="tip">${esc(t("migrated", { done: S.migratedFrom.done, quiz: S.migratedFrom.quiz }))}</p>` : ""}
       <form id="ob" class="ob-form">${profileForm(a)}</form>
       <p id="ob-preview" class="preview" aria-live="polite"></p>
       <div class="pn"><button class="btn" id="ob-save" type="button">${t("save_start")}</button><button class="btn ghost" id="ob-skip" type="button">${t("skip")}</button></div></section>`;
